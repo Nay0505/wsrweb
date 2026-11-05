@@ -1,0 +1,2 @@
+ 0x40 = files/*.inf
+ 0x40 = files/_sys/*.wad

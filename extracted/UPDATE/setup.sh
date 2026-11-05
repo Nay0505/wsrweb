@@ -1,0 +1,5 @@
+DISC_TYPE="Wii"
+IMAGE_TYPE="ISO"
+IMAGE_EXT="iso"
+PART_ID="RELSAB"
+PART_NAME="Sample Game Name"

@@ -1,0 +1,10 @@
+# setup.txt : scanned by wit+wwt while composing a disc.
+# remove the '!' before names to activate parameters.
+
+disc-type = Wii
+image-type = ISO
+
+!part-id = RELSAB
+!part-name = Sample Game Name
+!part-offset = 0x50000
+

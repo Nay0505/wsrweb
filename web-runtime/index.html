@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wii Sports Resort WASM Runtime</title>
+  <style>
+    :root { color-scheme: dark; font-family: Segoe UI, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #151a20; color: #e8edf2; }
+    main { width: min(720px, calc(100% - 32px)); }
+    .status { border: 1px solid #38434d; border-radius: 8px; padding: 16px; background: #20272e; }
+    button { padding: 10px 14px; border: 1px solid #627587; border-radius: 6px; background: #dfe8ee; color: #12171c; font: inherit; cursor: pointer; }
+    pre { min-height: 160px; overflow: auto; white-space: pre-wrap; color: #a9d1c1; }
+    canvas { width: 640px; max-width: 100%; height: auto; image-rendering: pixelated; background: #05070a; border: 1px solid #38434d; border-radius: 6px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>RZTE01 WASM Runtime</h1>
+    <div class="status">
+      <p id="status">Loading runtime...</p>
+      <canvas id="screen" width="640" height="480"></canvas>
+      <button id="step" disabled>Run continuously</button>
+      <button id="stop" disabled>Stop</button>
+      <label>
+        Extracted DATA folder
+        <input id="folder" type="file" webkitdirectory directory multiple>
+      </label>
+      <pre id="log"></pre>
+    </div>
+  </main>
+  <script src="rz-runtime.js?v=10"></script>
+  <script>
+    const status = document.querySelector('#status');
+    const log = document.querySelector('#log');
+    const stepButton = document.querySelector('#step');
+    const stopButton = document.querySelector('#stop');
+    const folderInput = document.querySelector('#folder');
+    const screen = document.querySelector('#screen');
+    const screenContext = screen.getContext('2d');
+    let running = false;
+
+    function write(text) {
+      log.textContent += text + '\n';
+      log.scrollTop = log.scrollHeight;
+    }
+
+    Module.onRuntimeInitialized = () => {
+      status.textContent = 'Runtime loaded. Initializing embedded main.dol...';
+      const initialized = Module.ccall('rz_runtime_init', 'number', ['string'], ['main.dol']);
+      write('init=' + initialized);
+      if (!initialized) {
+        status.textContent = 'DOL initialization failed.';
+        return;
+      }
+      status.textContent = 'main.dol initialized.';
+      stepButton.disabled = false;
+      stageExtractedPartition();
+    };
+
+    async function stageExtractedPartition() {
+      try {
+        status.textContent = 'Loading extracted DATA partition...';
+        const response = await fetch('/__manifest__/extracted/DATA');
+        const files = await response.json();
+        for (let index = 0; index < files.length; index += 16) {
+          const batch = files.slice(index, index + 16);
+          await Promise.all(batch.map(async (relativePath) => {
+            const fileResponse = await fetch('/' + relativePath);
+            if (!fileResponse.ok) return;
+            const slash = relativePath.lastIndexOf('/');
+            const directoryParts = slash >= 0 ? relativePath.slice(0, slash).split('/') : [];
+            let directory = '/';
+            for (const part of directoryParts) {
+              if (!part) continue;
+              directory += (directory === '/' ? '' : '/') + part;
+              try { Module.FS.mkdir(directory); } catch (_) {}
+            }
+            Module.FS.writeFile('/' + relativePath, new Uint8Array(await fileResponse.arrayBuffer()));
+          }));
+          status.textContent = 'Loading extracted DATA partition... ' +
+            Math.min(index + batch.length, files.length) + '/' + files.length;
+        }
+        const reinitialized = Module.ccall('rz_runtime_init', 'number', ['string'], ['main.dol']);
+        write('auto_disc_files=' + files.length +
+          ' reinit=' + reinitialized +
+          ' regions=' + Module.ccall('rz_runtime_disc_region_count', 'number', [], []));
+        status.textContent = reinitialized ? 'Extracted DATA partition loaded; runtime ready.' :
+          'Partition loaded, but runtime reinitialization failed.';
+      } catch (error) {
+        write('auto_disc_error=' + error.message);
+        status.textContent = 'Embedded runtime ready. Select the DATA folder to add assets.';
+      }
+    }
+
+    folderInput.addEventListener('change', async () => {
+      if (!folderInput.files.length) return;
+      let staged = 0;
+      for (const file of folderInput.files) {
+        const relativePath = file.webkitRelativePath || file.name;
+        const slash = relativePath.lastIndexOf('/');
+        const pathParts = slash >= 0 ? relativePath.slice(0, slash).split('/') : [];
+        let directory = '/';
+        for (const part of pathParts) {
+          if (!part) continue;
+          directory += (directory === '/' ? '' : '/') + part;
+          try { Module.FS.mkdir(directory); } catch (_) {}
+        }
+        const virtualPath = '/' + relativePath;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        Module.FS.writeFile(virtualPath, bytes);
+        staged++;
+      }
+      write('local_files=' + staged);
+      status.textContent = staged + ' local files staged in browser WASM memory.';
+      const initialized = Module.ccall('rz_runtime_init', 'number', ['string'], ['main.dol']);
+      write('disc_init=' + initialized +
+        ' regions=' + Module.ccall('rz_runtime_disc_region_count', 'number', [], []));
+      stepButton.disabled = initialized ? false : true;
+    });
+
+    function report() {
+      const stepped = Module.ccall('rz_runtime_step', 'number', ['number'], [10000]);
+      const pc = Module.ccall('rz_runtime_pc', 'number', [], []) >>> 0;
+      const exception = Module.ccall('rz_runtime_exception', 'number', [], []) >>> 0;
+      const reads = Module.ccall('rz_runtime_external_read_count', 'number', [], []);
+      const writes = Module.ccall('rz_runtime_external_write_count', 'number', [], []);
+      const hosts = Module.ccall('rz_runtime_host_call_count', 'number', [], []);
+      const gxBytes = Module.ccall('rz_runtime_gx_bytes', 'number', [], []);
+      const xfbAddress = Module.ccall('rz_runtime_vi_xfb_address', 'number', [], []) >>> 0;
+      if (xfbAddress) {
+        const guestPtr = Module.ccall('rz_runtime_memory_ptr', 'number', ['number'], [xfbAddress]);
+        if (guestPtr) {
+          const image = screenContext.createImageData(640, 480);
+          const source = Module.HEAPU8.subarray(guestPtr, guestPtr + 640 * 480 * 2);
+          let nonzero = 0;
+          for (let y = 0; y < 480; y++) {
+            for (let x = 0; x < 640; x++) {
+              const s = (y * 640 + x) * 2;
+              const dst = (y * 640 + x) * 4;
+              const y1 = source[s] || 16;
+              const cb = source[s + 1] || 128;
+              const y2 = source[s + 2] || y1;
+              const cr = source[s + 3] || 128;
+              const luma = (x & 1) ? y2 : y1;
+              if (source[s] || source[s + 1]) nonzero++;
+              image.data[dst] = Math.max(0, Math.min(255, luma + 1.402 * (cr - 128)));
+              image.data[dst + 1] = Math.max(0, Math.min(255, luma - 0.344136 * (cb - 128) - 0.714136 * (cr - 128)));
+              image.data[dst + 2] = Math.max(0, Math.min(255, luma + 1.772 * (cb - 128)));
+              image.data[dst + 3] = 255;
+            }
+          }
+          screenContext.putImageData(image, 0, 0);
+          screenContext.fillStyle = 'rgba(0,0,0,.65)';
+          screenContext.fillRect(0, 0, 430, 28);
+          screenContext.fillStyle = '#dfe8ee';
+          screenContext.font = '16px Segoe UI';
+          screenContext.fillText('XFB 0x' + xfbAddress.toString(16).padStart(8, '0') + ' data=' + nonzero, 12, 20);
+        }
+      } else {
+        screenContext.fillStyle = '#05070a';
+        screenContext.fillRect(0, 0, 640, 480);
+        screenContext.fillStyle = '#8fa7b5';
+        screenContext.font = '16px Segoe UI';
+        screenContext.fillText('Waiting for XFB', 24, 32);
+      }
+      write('step=' + stepped + ' pc=0x' + pc.toString(16).padStart(8, '0') +
+        ' exception=0x' + exception.toString(16).padStart(8, '0') +
+        ' mmio=' + reads + '/' + writes + ' host=' + hosts +
+        ' gx=' + gxBytes + ' xfb=0x' + xfbAddress.toString(16).padStart(8, '0'));
+      if ((pc & 0xFFFFFFFF) === 0x8002e7f0) {
+        const r = (index) => (Module.ccall('rz_runtime_register', 'number', ['number'], [index]) >>> 0).toString(16).padStart(8, '0');
+        const lr = (Module.ccall('rz_runtime_lr', 'number', [], []) >>> 0).toString(16).padStart(8, '0');
+        const r3 = r(3), r31 = r(31), r30 = r(30), r29 = r(29), r28 = r(28);
+        const stateAddress = (Module.ccall('rz_runtime_register', 'number', ['number'], [3]) >>> 0) + 26636;
+        const state = (Module.ccall('rz_runtime_peek', 'number', ['number'], [stateAddress >>> 0]) >>> 0).toString(16).padStart(8, '0');
+        write('spin r3=' + r3 + ' r30=' + r30 + ' r31=' + r31 + ' r29=' + r29 + ' r28=' + r28 +
+          ' lr=0x' + lr + ' state=0x' + state);
+      }
+    }
+
+    function runFrame() {
+      if (!running) return;
+      report();
+      requestAnimationFrame(runFrame);
+    }
+
+    stepButton.addEventListener('click', () => {
+      running = true;
+      stepButton.disabled = true;
+      stopButton.disabled = false;
+      status.textContent = 'Running translated Wii code...';
+      runFrame();
+    });
+
+    stopButton.addEventListener('click', () => {
+      running = false;
+      stepButton.disabled = false;
+      stopButton.disabled = true;
+      status.textContent = 'Execution stopped.';
+    });
+  </script>
+</body>
+</html>
